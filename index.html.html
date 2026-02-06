@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1a1a2e">
+<title>Leadership Load Tracker</title>
+<link rel="manifest" href="data:application/json;base64,eyJuYW1lIjoiTGVhZGVyc2hpcCBMb2FkIFRyYWNrZXIiLCJzaG9ydF9uYW1lIjoiTExUIiwiZGlzcGxheSI6InN0YW5kYWxvbmUiLCJiYWNrZ3JvdW5kX2NvbG9yIjoiIzFhMWEyZSIsInRoZW1lX2NvbG9yIjoiIzFhMWEyZSIsInN0YXJ0X3VybCI6Ii4ifQ==">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600;700&family=Fraunces:wght@700;800;900&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{font-family:'Outfit',sans-serif;background:#f4f4f9;overscroll-behavior:none}
+  input,textarea,select,button{font-family:inherit}
+  @keyframes toastIn{from{opacity:0;transform:translate(-50%,-12px)}to{opacity:1;transform:translate(-50%,0)}}
+  @media print{.no-print{display:none!important}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script type="text/babel">
+const {useState,useEffect,useMemo,useCallback} = React;
+
+/* ═══ STORAGE (localStorage) ═══ */
+const SK="llt_v4", PIN_SK="llt_v4_pin";
+function loadStore(){try{const r=localStorage.getItem(SK);return r?JSON.parse(r):null}catch{return null}}
+function saveStore(d){try{localStorage.setItem(SK,JSON.stringify(d))}catch(e){console.error(e)}}
+function loadPin(){try{return localStorage.getItem(PIN_SK)}catch{return null}}
+function savePinStore(h){try{localStorage.setItem(PIN_SK,h)}catch(e){console.error(e)}}
+function deletePinStore(){try{localStorage.removeItem(PIN_SK)}catch(e){console.error(e)}}
+function hashPin(pin){let h=0;const s="llt_salt_"+pin;for(let i=0;i<s.length;i++){h=((h<<5)-h+s.charCodeAt(i))|0}return"h_"+Math.abs(h).toString(36)}
+
+/* ═══ HELPERS ═══ */
+const todayStr=()=>new Date().toISOString().slice(0,10);
+const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+const daysBetween=(a,b)=>Math.round((new Date(b)-new Date(a))/86400000);
+const isoWeek=(d)=>{const dt=new Date(d);dt.setHours(0,0,0,0);dt.setDate(dt.getDate()+3-((dt.getDay()+6)%7));const w1=new Date(dt.getFullYear(),0,4);return{year:dt.getFullYear(),week:Math.round(((dt-w1)/86400000-3+((w1.getDay()+6)%7))/7)+1}};
+const last7Days=()=>Array.from({length:7},(_,i)=>{const d=new Date();d.setDate(d.getDate()-(6-i));return d.toISOString().slice(0,10)});
+const WD=["Mo","Di","Mi","Do","Fr","Sa","So"];
+
+/* ═══ BI (v4 §2) ═══ */
+function calcBI(c){if(c.decision_pressure==null||c.conflict_tension==null||c.load_handoff==null||c.agency==null)return null;const last=(c.decision_pressure+c.conflict_tension+c.load_handoff)/3;const kap=Math.max(c.agency,0.5);const bi=Math.round((last/kap)*100)/10;return Math.min(30,Math.max(0,bi))}
+function biColor(bi){if(bi==null)return"#888";if(bi<=9)return"#27AE60";if(bi<=14)return"#F39C12";return"#E74C3C"}
+function biLabel(bi){if(bi==null)return"";if(bi<=9)return"Kapazität trägt Last";if(bi<=14)return"Last ≈ Kapazität";return"Last übersteigt Kapazität"}
+
+/* ═══ CONSTANTS ═══ */
+const DIMS=[
+  {key:"decision_pressure",label:"Entscheidungsdruck",icon:"⚖️",anchors:["kein Druck","kaum spürbar","merkbar","belastend","stark belastend","überwältigend"]},
+  {key:"conflict_tension",label:"Konfliktspannung",icon:"⚡",anchors:["keine Spannung","leicht","spürbar","hoch","sehr hoch","eskalierend"]},
+  {key:"load_handoff",label:"Lastweiterleitung",icon:"↗️",anchors:["nichts durchgereicht","minimal","etwas","spürbar","viel","alles landet bei mir"]},
+  {key:"agency",label:"Handlungsfähigkeit",icon:"🎯",positive:true,anchors:["handlungsunfähig","stark eingeschränkt","eingeschränkt","brauchbar","gut","voll handlungsfähig"]},
+];
+const ITEM_TYPES=[{key:"decision",label:"Entscheidung"},{key:"conflict",label:"Konflikt"},{key:"ambiguity",label:"Unklarheit"},{key:"workload",label:"Arbeitslast"},{key:"stakeholder",label:"Stakeholder"},{key:"other",label:"Sonstiges"}];
+const ITEM_STATUSES=[{key:"open",label:"Offen",color:"#E74C3C"},{key:"in_progress",label:"In Bearbeitung",color:"#F39C12"},{key:"resolved",label:"Gelöst",color:"#27AE60"},{key:"dropped",label:"Fallen gelassen",color:"#95A5A6"}];
+const EVENT_TYPES={load_source:{label:"Lastquelle",color:"#E74C3C",icon:"🔴"},stall:{label:"Staupunkt",color:"#F39C12",icon:"🟡"},action:{label:"Maßnahme",color:"#3498DB",icon:"🔵"},outcome:{label:"Abtragung",color:"#27AE60",icon:"🟢"}};
+const EDGE_TYPES={causes:{label:"verursacht",color:"#E74C3C"},blocks:{label:"blockiert",color:"#F39C12"},relieves:{label:"entlastet",color:"#27AE60"},escalates:{label:"eskaliert",color:"#9B59B6"},delegates:{label:"delegiert",color:"#3498DB"}};
+const EMPTY_DB={checkins:{},items:[],events:[],edges:[],weeklyNotes:{}};
+
+/* ═══ CSV EXPORT ═══ */
+function exportCSV(db,from,to){
+  const inR=(d)=>d>=from&&d<=to;const esc=(s)=>(s||"").replace(/;/g,",").replace(/\n/g," ");
+  let csv="# Leadership Load Tracker Export\n# Zeitraum: "+from+" bis "+to+"\n\n";
+  csv+="# DailyCheckIn\nDatum;Entscheidungsdruck;Konfliktspannung;Lastweiterleitung;Handlungsfähigkeit;BI;Notiz\n";
+  Object.entries(db.checkins).filter(([d])=>inR(d)).sort(([a],[b])=>a.localeCompare(b)).forEach(([d,c])=>{csv+=`${d};${c.decision_pressure};${c.conflict_tension};${c.load_handoff};${c.agency};${calcBI(c)||""};${esc(c.note)}\n`});
+  csv+="\n# Items\nTitel;Typ;Status;Erstellt;Gelöst\n";
+  db.items.forEach(it=>{csv+=`${esc(it.title)};${it.type};${it.status};${it.created};${it.resolved_at||""}\n`});
+  csv+="\n# Events\nLabel;Typ;Delta;Erstellt\n";
+  db.events.forEach(ev=>{csv+=`${esc(ev.label)};${ev.type};${ev.load_delta};${ev.created}\n`});
+  const{week}=isoWeek(from);const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});
+  const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`LLT_KW${String(week).padStart(2,"0")}.csv`;a.click();URL.revokeObjectURL(url);
+}
+
+/* ═══ TOAST ═══ */
+function Toast({message,type,onDone}){
+  useEffect(()=>{const t=setTimeout(onDone,2400);return()=>clearTimeout(t)},[onDone]);
+  const bg=type==="success"?"#27AE60":type==="error"?"#E74C3C":"#1a1a2e";
+  return(<div style={{position:"fixed",top:14,left:"50%",transform:"translateX(-50%)",zIndex:100,background:bg,color:"#fff",padding:"10px 20px",borderRadius:10,fontSize:13,fontWeight:600,boxShadow:"0 4px 16px rgba(0,0,0,.25)",animation:"toastIn .25s ease"}}>{type==="success"?"✓ ":type==="error"?"✗ ":""}{message}</div>);
+}
+
+/* ═══ STEP BUTTONS (0–5) ═══ */
+function StepButtons({dim,value,onChange}){
+  const colorFor=(step,sel)=>{if(!sel)return{bg:"#f0f0f5",fg:"#999",border:"transparent"};const r=step/5;let c;if(dim.positive)c=r<=.33?"#E74C3C":r<=.66?"#F39C12":"#27AE60";else c=r<=.33?"#27AE60":r<=.66?"#F39C12":"#E74C3C";return{bg:c+"18",fg:c,border:c}};
+  const sel=value!=null?colorFor(value,true):null;
+  return(
+    <div style={{marginBottom:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:3}}>
+        <span style={{fontSize:13,fontWeight:600,color:"#1a1a2e"}}>{dim.icon} {dim.label}</span>
+        {value!=null&&<span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,fontWeight:700,color:sel.fg}}>{value}/5</span>}
+      </div>
+      <div style={{display:"flex",gap:5,marginBottom:3}}>
+        {[0,1,2,3,4,5].map(i=>{const s=colorFor(i,value===i);return(
+          <button key={i} onClick={()=>onChange(i)} style={{flex:1,padding:"10px 0",border:`2px solid ${s.border}`,borderRadius:8,background:s.bg,color:s.fg,fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"'IBM Plex Mono',monospace",transition:"all .12s",boxShadow:value===i?`0 2px 8px ${s.border}30`:"none"}}>{i}</button>
+        )})}
+      </div>
+      <div style={{fontSize:10,color:"#999",minHeight:14}}>{value!=null?dim.anchors[value]:"Bitte Stufe wählen"}</div>
+    </div>
+  );
+}
+
+/* ═══ SPARKLINE ═══ */
+function Spark({data,color,labels}){
+  return(<div style={{display:"flex",alignItems:"flex-end",gap:3,height:38}}>
+    {data.map((v,i)=>(<div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center"}}>
+      <div style={{width:"100%",maxWidth:22,height:v!=null?Math.max(3,(v/5)*32):2,background:v!=null?color:"#e0e0e6",borderRadius:2,opacity:v!=null?.8:.25,transition:"height .3s"}}/>
+      <span style={{fontSize:8,color:"#bbb",fontFamily:"'IBM Plex Mono',monospace",marginTop:2}}>{labels?.[i]||""}</span>
+    </div>))}
+  </div>);
+}
+
+/* ═══ LASTPFAD GRAPH ═══ */
+function LastpfadGraph({events,edges,onSelect}){
+  const cols=useMemo(()=>({sources:events.filter(e=>e.type==="load_source"),stalls:events.filter(e=>e.type==="stall"),outputs:[...events.filter(e=>e.type==="action"),...events.filter(e=>e.type==="outcome")]}),[events]);
+  const pos=useMemo(()=>{const p={};const xs=[65,230,395];[cols.sources,cols.stalls,cols.outputs].forEach((col,ci)=>{const sp=Math.min(54,260/Math.max(col.length,1));col.forEach((n,ni)=>{p[n.id]={x:xs[ci],y:40+ni*sp}})});return p},[cols]);
+  const validEdges=useMemo(()=>{const ids=new Set(events.map(e=>e.id));return edges.filter(e=>ids.has(e.from)&&ids.has(e.to))},[events,edges]);
+  const h=Math.max(170,Math.max(cols.sources.length,cols.stalls.length,cols.outputs.length)*54+55);
+  if(events.length===0)return(<div style={{textAlign:"center",padding:"28px 16px",color:"#aaa"}}><div style={{fontSize:34,marginBottom:6,opacity:.4}}>🔗</div><div style={{fontSize:13}}>Noch keine Events.</div><div style={{fontSize:11,color:"#bbb"}}>Erstelle Events über +</div></div>);
+  return(
+    <div style={{overflowX:"auto",WebkitOverflowScrolling:"touch"}}>
+      <svg width={460} height={h} style={{display:"block"}}>
+        {[["LASTQUELLEN",65],["STAUPUNKTE",230],["ABTRAGUNGEN",395]].map(([t,x])=>(<text key={t} x={x} y={16} textAnchor="middle" style={{fontSize:8.5,fontWeight:700,fill:"#aaa",letterSpacing:".06em"}}>{t}</text>))}
+        {validEdges.map((ed,i)=>{const f=pos[ed.from],to=pos[ed.to];if(!f||!to)return null;const et=EDGE_TYPES[ed.relation]||EDGE_TYPES.causes;const mx=(f.x+to.x)/2;const dash=ed.relation==="blocks"?"6,3":ed.relation==="escalates"?"3,3":"none";return(<g key={i}><path d={`M${f.x+44},${f.y} C${mx},${f.y} ${mx},${to.y} ${to.x-44},${to.y}`} fill="none" stroke={et.color} strokeWidth={2} opacity={.4} strokeDasharray={dash}/><polygon points={`${to.x-46},${to.y} ${to.x-52},${to.y-3} ${to.x-52},${to.y+3}`} fill={et.color} opacity={.5}/></g>)})}
+        {events.map(ev=>{const p=pos[ev.id];if(!p)return null;const et=EVENT_TYPES[ev.type];const age=daysBetween(ev.created,todayStr());return(<g key={ev.id} onClick={()=>onSelect?.(ev)} style={{cursor:"pointer"}}><rect x={p.x-42} y={p.y-14} width={84} height={28} rx={7} fill="#fff" stroke={et.color} strokeWidth={1.8}/><text x={p.x} y={p.y-1} textAnchor="middle" style={{fontSize:9.5,fontWeight:600,fill:"#1a1a2e"}}>{ev.label.length>11?ev.label.slice(0,10)+"…":ev.label}</text><text x={p.x} y={p.y+10} textAnchor="middle" style={{fontSize:7.5,fill:"#aaa",fontFamily:"'IBM Plex Mono',monospace"}}>{age}d · Δ{ev.load_delta>0?"+":""}{ev.load_delta}</text></g>)})}
+      </svg>
+    </div>
+  );
+}
+
+const Card=({children,style})=>(<div style={{background:"#fff",borderRadius:14,padding:18,marginBottom:12,boxShadow:"0 1px 3px rgba(0,0,0,.04)",...style}}>{children}</div>);
+
+/* ═══ PIN LOCK ═══ */
+function PinLock({onUnlock}){
+  const[phase,setPhase]=useState("loading");
+  const[storedHash,setStoredHash]=useState(null);
+  const[pin,setPin]=useState("");
+  const[setupPin,setSetupPin]=useState("");
+  const[error,setError]=useState("");
+  const[attempts,setAttempts]=useState(0);
+  const[locked,setLocked]=useState(false);
+  const[lockTimer,setLockTimer]=useState(0);
+
+  useEffect(()=>{const h=loadPin();if(h){setStoredHash(h);setPhase("unlock")}else setPhase("setup")},[]);
+  useEffect(()=>{if(!locked)return;const iv=setInterval(()=>{setLockTimer(p=>{if(p<=1){setLocked(false);setAttempts(0);clearInterval(iv);return 0}return p-1})},1000);return()=>clearInterval(iv)},[locked]);
+
+  const handleDigit=(d)=>{if(locked)return;if(pin.length<4){const next=pin+d;setPin(next);setError("");if(next.length===4)setTimeout(()=>processPin(next),150)}};
+  const handleDelete=()=>{if(!locked){setPin(pin.slice(0,-1));setError("")}};
+  const processPin=(p)=>{
+    if(phase==="setup"){setSetupPin(p);setPin("");setPhase("confirm")}
+    else if(phase==="confirm"){if(p===setupPin){const h=hashPin(p);savePinStore(h);setStoredHash(h);onUnlock()}else{setError("PINs stimmen nicht überein");setPin("");setPhase("setup");setSetupPin("")}}
+    else if(phase==="unlock"){const h=hashPin(p);if(h===storedHash){onUnlock()}else{const next=attempts+1;setAttempts(next);setPin("");if(next>=3){setLocked(true);setLockTimer(30);setError("3 Fehlversuche – 30s Sperre")}else setError(`Falsche PIN (${next}/3)`)}}
+  };
+  const titles={loading:"",setup:"PIN festlegen",confirm:"PIN bestätigen",unlock:"PIN eingeben"};
+  const subs={setup:"4-stellige PIN zum Schutz deiner Daten",confirm:"Bitte erneut eingeben",unlock:"PIN eingeben um fortzufahren"};
+  if(phase==="loading")return(<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#1a1a2e",color:"#fff"}}><div style={{textAlign:"center"}}>🔒 Wird geladen…</div></div>);
+  return(
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:"#1a1a2e",color:"#fff",padding:20}}>
+      <div style={{fontSize:32,marginBottom:16}}>🔒</div>
+      <h1 style={{fontFamily:"'Fraunces',serif",fontSize:20,fontWeight:800,margin:"0 0 4px"}}>Leadership Load Tracker</h1>
+      <h2 style={{fontSize:15,fontWeight:600,color:"#ccc",margin:"0 0 6px"}}>{titles[phase]}</h2>
+      <p style={{fontSize:12,color:"#7a7a9a",margin:"0 0 24px",textAlign:"center"}}>{subs[phase]}</p>
+      <div style={{display:"flex",gap:14,marginBottom:20}}>
+        {[0,1,2,3].map(i=>(<div key={i} style={{width:16,height:16,borderRadius:"50%",background:i<pin.length?"#fff":"transparent",border:"2px solid "+(i<pin.length?"#fff":"#555"),transition:"all .15s"}}/>))}
+      </div>
+      {error&&<p style={{fontSize:12,color:"#E74C3C",marginBottom:12,fontWeight:600}}>{error}</p>}
+      {locked&&<p style={{fontSize:13,color:"#F39C12",marginBottom:12,fontFamily:"'IBM Plex Mono',monospace"}}>⏳ {lockTimer}s</p>}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,72px)",gap:10,marginBottom:16}}>
+        {[1,2,3,4,5,6,7,8,9,null,0,"del"].map((d,i)=>{if(d===null)return <div key={i}/>;const isDel=d==="del";return(
+          <button key={i} onClick={()=>isDel?handleDelete():handleDigit(String(d))} disabled={locked}
+            style={{width:72,height:56,borderRadius:12,border:"none",background:locked?"#222":isDel?"transparent":"#2a2a48",color:locked?"#444":isDel?"#888":"#fff",fontSize:isDel?14:22,fontWeight:600,cursor:locked?"not-allowed":"pointer",fontFamily:isDel?"'Outfit',sans-serif":"'IBM Plex Mono',monospace"}}>{isDel?"←":d}</button>
+        )})}
+      </div>
+      {phase==="setup"&&(<button onClick={()=>{deletePinStore();onUnlock()}} style={{background:"none",border:"none",color:"#555",fontSize:12,cursor:"pointer",marginTop:8}}>Ohne PIN fortfahren</button>)}
+    </div>
+  );
+}
+
+/* ═══ SETTINGS ═══ */
+function SettingsPanel({onClose,flash}){
+  const[hasPin,setHasPin]=useState(false);
+  const[action,setAction]=useState(null);
+  const[step,setStep]=useState(0);
+  const[cur,setCur]=useState("");
+  const[newP,setNewP]=useState("");
+  const[error,setError]=useState("");
+  useEffect(()=>{setHasPin(!!loadPin())},[]);
+  const verify=(p)=>loadPin()===hashPin(p);
+  const doSet=async(p)=>{savePinStore(hashPin(p));setHasPin(true);setAction(null);setStep(0);setCur("");setNewP("");flash("PIN gespeichert")};
+  const doRemove=()=>{if(hasPin&&!verify(cur)){setError("Falsche PIN");setCur("");return}deletePinStore();setHasPin(false);setAction(null);setCur("");flash("PIN entfernt")};
+  const inputS={width:"100%",padding:"12px",border:"2px solid #eaeaf0",borderRadius:8,fontSize:18,fontFamily:"'IBM Plex Mono',monospace",textAlign:"center",letterSpacing:12,outline:"none",boxSizing:"border-box",WebkitTextSecurity:"disc"};
+  const btnS={width:"100%",padding:"12px",border:"none",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer"};
+  return(
+    <div style={{background:"#fff",borderRadius:14,padding:18,margin:"12px 12px 0",boxShadow:"0 4px 20px rgba(0,0,0,.08)"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <h3 style={{fontSize:14,fontWeight:700,margin:0,color:"#1a1a2e"}}>⚙️ Einstellungen</h3>
+        <button onClick={onClose} style={{background:"none",border:"none",fontSize:14,color:"#ccc",cursor:"pointer"}}>✕</button>
+      </div>
+      <div style={{padding:"10px 12px",background:"#f4f4f9",borderRadius:8,marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div><div style={{fontSize:13,fontWeight:600,color:"#1a1a2e"}}>🔒 PIN-Schutz</div><div style={{fontSize:11,color:"#888"}}>{hasPin?"Aktiv":"Nicht gesetzt"}</div></div>
+        <div style={{width:10,height:10,borderRadius:"50%",background:hasPin?"#27AE60":"#ccc"}}/>
+      </div>
+      {!action&&(<div style={{display:"flex",gap:8}}>
+        <button onClick={()=>{setAction("change");setStep(hasPin?0:1);setError("");setCur("");setNewP("")}} style={{...btnS,flex:1,background:"#1a1a2e",color:"#fff"}}>{hasPin?"PIN ändern":"PIN setzen"}</button>
+        {hasPin&&<button onClick={()=>{setAction("remove");setStep(0);setError("");setCur("")}} style={{...btnS,flex:1,background:"#f0f0f5",color:"#E74C3C"}}>PIN entfernen</button>}
+      </div>)}
+      {action==="change"&&(<div style={{marginTop:10}}>
+        {step===0&&hasPin&&(<><div style={{fontSize:12,fontWeight:600,marginBottom:6}}>Aktuelle PIN</div><input value={cur} onChange={e=>setCur(e.target.value.replace(/\D/g,"").slice(0,4))} type="tel" maxLength={4} style={inputS} autoFocus/></>)}
+        {step===1&&(<><div style={{fontSize:12,fontWeight:600,marginBottom:6}}>Neue PIN (4 Stellen)</div><input value={newP} onChange={e=>setNewP(e.target.value.replace(/\D/g,"").slice(0,4))} type="tel" maxLength={4} style={inputS} autoFocus/></>)}
+        {step===2&&(<><div style={{fontSize:12,fontWeight:600,marginBottom:6}}>Neue PIN bestätigen</div><input value={cur} onChange={e=>setCur(e.target.value.replace(/\D/g,"").slice(0,4))} type="tel" maxLength={4} style={inputS} autoFocus/></>)}
+        {error&&<p style={{fontSize:11,color:"#E74C3C",marginTop:6,fontWeight:600}}>{error}</p>}
+        <div style={{display:"flex",gap:8,marginTop:10}}>
+          <button onClick={()=>{if(step===0&&hasPin){if(!verify(cur)){setError("Falsche PIN");setCur("");return}setStep(1);setError("");setCur("")}else if(step===1){if(newP.length!==4){setError("4 Stellen nötig");return}setStep(2);setError("");setCur("")}else if(step===2){if(cur!==newP){setError("PINs stimmen nicht überein");setCur("");return}doSet(newP)}}} style={{...btnS,flex:1,background:"#1a1a2e",color:"#fff"}}>{step===2?"Speichern":"Weiter"}</button>
+          <button onClick={()=>{setAction(null);setStep(0);setError("");setCur("");setNewP("")}} style={{...btnS,flex:1,background:"#f0f0f5",color:"#1a1a2e"}}>Abbrechen</button>
+        </div>
+      </div>)}
+      {action==="remove"&&(<div style={{marginTop:10}}>
+        <div style={{fontSize:12,fontWeight:600,marginBottom:6}}>Aktuelle PIN zum Entfernen</div>
+        <input value={cur} onChange={e=>setCur(e.target.value.replace(/\D/g,"").slice(0,4))} type="tel" maxLength={4} style={inputS} autoFocus/>
+        {error&&<p style={{fontSize:11,color:"#E74C3C",marginTop:6,fontWeight:600}}>{error}</p>}
+        <div style={{display:"flex",gap:8,marginTop:10}}>
+          <button onClick={doRemove} disabled={cur.length<4} style={{...btnS,flex:1,background:"#E74C3C",color:"#fff",opacity:cur.length<4?.5:1}}>Entfernen</button>
+          <button onClick={()=>{setAction(null);setError("");setCur("")}} style={{...btnS,flex:1,background:"#f0f0f5",color:"#1a1a2e"}}>Abbrechen</button>
+        </div>
+      </div>)}
+      <div style={{marginTop:12,padding:"8px 10px",background:"#FFF8E1",borderRadius:6,fontSize:10,color:"#F39C12"}}>⚠ Soft-Lock: Schützt vor beiläufigem Zugriff, kein Ersatz für Gerätesperre.</div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   MAIN APP
+   ═══════════════════════════════════════════════════════ */
+function MainApp(){
+  const[ready,setReady]=useState(false);
+  const[db,setDb]=useState(EMPTY_DB);
+  const[tab,setTab]=useState("checkin");
+  const[toast,setToast]=useState(null);
+  const[showSettings,setShowSettings]=useState(false);
+  const[ci,setCi]=useState({decision_pressure:null,conflict_tension:null,load_handoff:null,agency:null});
+  const[ciNote,setCiNote]=useState("");
+  const[ciSaved,setCiSaved]=useState(false);
+  const[newTitle,setNewTitle]=useState("");
+  const[newType,setNewType]=useState("decision");
+  const[itemFilter,setItemFilter]=useState("all");
+  const[showEvEditor,setShowEvEditor]=useState(false);
+  const[evType,setEvType]=useState("load_source");
+  const[evLabel,setEvLabel]=useState("");
+  const[evDelta,setEvDelta]=useState(1);
+  const[selNode,setSelNode]=useState(null);
+  const[showEdgeForm,setShowEdgeForm]=useState(false);
+  const[edgeFrom,setEdgeFrom]=useState("");
+  const[edgeTo,setEdgeTo]=useState("");
+  const[edgeRel,setEdgeRel]=useState("causes");
+  const[weekNote,setWeekNote]=useState("");
+  const[showLP,setShowLP]=useState(false);
+  const[showPrint,setShowPrint]=useState(false);
+
+  const t=todayStr();
+  const{year:iY,week:iW}=isoWeek(t);
+  const d7=last7Days();
+
+  useEffect(()=>{
+    const d=loadStore();
+    if(d){const m={...EMPTY_DB,...d};setDb(m);const c=m.checkins[todayStr()];if(c){setCi({decision_pressure:c.decision_pressure,conflict_tension:c.conflict_tension,load_handoff:c.load_handoff,agency:c.agency});setCiNote(c.note||"");setCiSaved(true)}const wk=`${iY}-${iW}`;if(m.weeklyNotes?.[wk])setWeekNote(m.weeklyNotes[wk].note_text||"")}
+    setReady(true);
+  },[]);
+
+  const update=useCallback((fn)=>{setDb(prev=>{const next=fn(prev);saveStore(next);return next})},[]);
+  const flash=(msg,type="success")=>setToast({message:msg,type});
+  const todayBI=useMemo(()=>{const c=db.checkins[t];return c?calcBI(c):null},[db.checkins,t]);
+
+  const ciValid=ci.decision_pressure!=null&&ci.conflict_tension!=null&&ci.load_handoff!=null&&ci.agency!=null;
+  const saveCI=()=>{if(!ciValid){flash("Alle 4 Dimensionen bewerten","error");return}const bi=calcBI(ci);update(d=>({...d,checkins:{...d.checkins,[t]:{...ci,note:ciNote,date:t,load_index:bi,created_at:new Date().toISOString()}}}));setCiSaved(true);flash("Check-in gespeichert")};
+  const addItem=()=>{if(!newTitle.trim()){flash("Titel ist Pflicht","error");return}update(d=>({...d,items:[...d.items,{id:uid(),type:newType,title:newTitle.trim(),description:"",status:"open",created:t,resolved_at:null}]}));setNewTitle("");flash("Angelegt")};
+  const setStatus=(id,s)=>update(d=>({...d,items:d.items.map(it=>it.id===id?{...it,status:s,resolved_at:(s==="resolved"||s==="dropped")?t:null}:it)}));
+  const delItem=(id)=>update(d=>({...d,items:d.items.filter(i=>i.id!==id)}));
+  const filtered=useMemo(()=>{const items=[...db.items].reverse();return itemFilter==="all"?items:items.filter(i=>i.status===itemFilter)},[db.items,itemFilter]);
+  const openItems=db.items.filter(i=>i.status==="open"||i.status==="in_progress");
+  const overdueItems=openItems.filter(i=>daysBetween(i.created,t)>=7);
+
+  const addEv=()=>{if(!evLabel.trim()){flash("Label ist Pflicht","error");return}update(d=>({...d,events:[...d.events,{id:uid(),type:evType,label:evLabel.trim(),load_delta:evDelta,created:t}]}));setEvLabel("");setShowEvEditor(false);flash("Event angelegt")};
+  const delEv=(id)=>{update(d=>({...d,events:d.events.filter(e=>e.id!==id),edges:d.edges.filter(e=>e.from!==id&&e.to!==id)}));if(selNode?.id===id)setSelNode(null)};
+  const addEdge=()=>{if(!edgeFrom||!edgeTo||edgeFrom===edgeTo){flash("Ungültige Verbindung","error");return}update(d=>({...d,edges:[...d.edges,{id:uid(),from:edgeFrom,to:edgeTo,relation:edgeRel,weight:null}]}));setEdgeFrom("");setEdgeTo("");setShowEdgeForm(false);flash("Verbindung erstellt")};
+  const delEdge=(id)=>update(d=>({...d,edges:d.edges.filter(e=>e.id!==id)}));
+
+  const saveWeekly=()=>{const wk=`${iY}-${iW}`;update(d=>({...d,weeklyNotes:{...d.weeklyNotes,[wk]:{iso_year:iY,iso_week:iW,note_text:weekNote,updated_at:t,created_at:d.weeklyNotes[wk]?.created_at||t}}}));flash("Wochennotiz gespeichert")};
+  const doExport=()=>{exportCSV(db,d7[0],d7[6]);flash("CSV exportiert")};
+
+  const weekCheckins=d7.map(d=>db.checkins[d]||null);
+  const weekBIs=weekCheckins.map(c=>c?calcBI(c):null);
+  const wStats=useMemo(()=>{const bis=weekBIs.filter(b=>b!=null);return{ciCount:weekCheckins.filter(Boolean).length,biAvg:bis.length?(bis.reduce((a,b)=>a+b,0)/bis.length).toFixed(1):"–",biMax:bis.length?Math.max(...bis).toFixed(1):"–",biMin:bis.length?Math.min(...bis).toFixed(1):"–",resolved:db.items.filter(i=>i.resolved_at&&i.resolved_at>=d7[0]).length}},[weekCheckins,weekBIs,db.items]);
+
+  const S={
+    btnP:{width:"100%",padding:"13px",border:"none",borderRadius:10,background:"#1a1a2e",color:"#fff",fontSize:14,fontWeight:600,cursor:"pointer",boxShadow:"0 3px 10px rgba(26,26,46,.15)"},
+    btnS:{width:"100%",padding:"13px",border:"none",borderRadius:10,background:"#f0f0f5",color:"#1a1a2e",fontSize:14,fontWeight:600,cursor:"pointer"},
+    btnD:{width:"100%",padding:"13px",border:"none",borderRadius:10,background:"#d0d0d8",color:"#fff",fontSize:14,fontWeight:600,cursor:"not-allowed"},
+    inp:{flex:1,padding:"10px 12px",border:"2px solid #eaeaf0",borderRadius:8,fontSize:13,outline:"none",boxSizing:"border-box"},
+    sel:{padding:"10px 8px",border:"2px solid #eaeaf0",borderRadius:8,fontSize:12,outline:"none",background:"#fff"},
+    chip:(a,c)=>({fontSize:11,fontWeight:600,padding:"5px 10px",borderRadius:6,cursor:"pointer",border:a?`2px solid ${c}`:"2px solid transparent",background:a?c+"18":"#f0f0f5",color:a?c:"#888",transition:"all .12s"}),
+    fab:{position:"fixed",bottom:76,right:"calc(50% - 196px)",width:46,height:46,borderRadius:"50%",background:"#1a1a2e",color:"#fff",border:"none",fontSize:22,cursor:"pointer",boxShadow:"0 4px 14px rgba(26,26,46,.3)",zIndex:8,display:"flex",alignItems:"center",justifyContent:"center"},
+  };
+  const TABS=[{key:"checkin",label:"Check-in",icon:"📋"},{key:"items",label:"Entscheid.",icon:"⚖️"},{key:"dashboard",label:"Dashboard",icon:"📊"},{key:"weekly",label:"Woche",icon:"📝"}];
+
+  if(!ready)return(<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#f4f4f9",color:"#888"}}><div style={{textAlign:"center"}}>⏳ Wird geladen…</div></div>);
+
+  /* Print view */
+  if(showPrint){return(
+    <div style={{maxWidth:700,margin:"0 auto",padding:40,background:"#fff",minHeight:"100vh"}}>
+      <button className="no-print" onClick={()=>setShowPrint(false)} style={{background:"none",border:"none",fontSize:13,color:"#3498DB",cursor:"pointer",fontWeight:600,marginBottom:16}}>← Zurück</button>
+      <h1 style={{fontFamily:"'Fraunces',serif",fontSize:22,fontWeight:800,marginBottom:4}}>Weekly Review – KW {iW}/{iY}</h1>
+      <p style={{color:"#888",fontSize:13,marginBottom:20}}>Leadership Load Tracker</p>
+      <table style={{width:"100%",borderCollapse:"collapse",marginBottom:20,fontSize:13}}><tbody>
+        <tr><td style={{padding:"6px 0",borderBottom:"1px solid #eee"}}>Check-ins</td><td style={{padding:"6px 0",borderBottom:"1px solid #eee",fontWeight:600}}>{wStats.ciCount}/7</td></tr>
+        <tr><td style={{padding:"6px 0",borderBottom:"1px solid #eee"}}>BI ø</td><td style={{padding:"6px 0",borderBottom:"1px solid #eee",fontWeight:600,color:biColor(parseFloat(wStats.biAvg))}}>{wStats.biAvg}</td></tr>
+        <tr><td style={{padding:"6px 0",borderBottom:"1px solid #eee"}}>BI Max/Min</td><td style={{padding:"6px 0",borderBottom:"1px solid #eee",fontWeight:600}}>{wStats.biMax}/{wStats.biMin}</td></tr>
+        <tr><td style={{padding:"6px 0",borderBottom:"1px solid #eee"}}>Offen</td><td style={{padding:"6px 0",borderBottom:"1px solid #eee",fontWeight:600}}>{openItems.length}</td></tr>
+      </tbody></table>
+      <h2 style={{fontSize:15,fontWeight:700,marginBottom:8}}>Tageswerte</h2>
+      <table style={{width:"100%",borderCollapse:"collapse",marginBottom:20,fontSize:12}}><thead><tr style={{borderBottom:"2px solid #1a1a2e"}}><th style={{textAlign:"left",padding:4}}>Tag</th>{DIMS.map(d=><th key={d.key} style={{textAlign:"center",padding:4}}>{d.icon}</th>)}<th style={{textAlign:"center",padding:4}}>BI</th></tr></thead><tbody>
+        {d7.map((day,i)=>{const c=db.checkins[day];const bi=c?calcBI(c):null;return(<tr key={day} style={{borderBottom:"1px solid #eee"}}><td style={{padding:4,fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{WD[i]} {day.slice(5)}</td>{DIMS.map(d=><td key={d.key} style={{textAlign:"center",padding:4}}>{c?c[d.key]:"–"}</td>)}<td style={{textAlign:"center",padding:4,fontWeight:600,color:biColor(bi)}}>{bi!=null?bi:"–"}</td></tr>)})}
+      </tbody></table>
+      {db.weeklyNotes[`${iY}-${iW}`]?.note_text&&(<><h2 style={{fontSize:15,fontWeight:700,marginBottom:8}}>Wochennotiz</h2><p style={{fontSize:13,whiteSpace:"pre-wrap",lineHeight:1.6}}>{db.weeklyNotes[`${iY}-${iW}`].note_text}</p></>)}
+      <button className="no-print" onClick={()=>window.print()} style={{...S.btnP,width:"auto",padding:"10px 24px",marginTop:20,fontSize:13}}>🖨️ Drucken / PDF</button>
+    </div>
+  )}
+
+  return(
+    <div style={{maxWidth:440,margin:"0 auto",minHeight:"100vh",background:"#f4f4f9",display:"flex",flexDirection:"column"}}>
+      {toast&&<Toast message={toast.message} type={toast.type} onDone={()=>setToast(null)}/>}
+
+      {/* HEADER */}
+      <div style={{background:"#1a1a2e",color:"#fff",padding:"15px 16px 12px",borderRadius:"0 0 16px 16px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{flex:1}}>
+            <h1 style={{fontFamily:"'Fraunces',serif",fontSize:17,fontWeight:800,margin:0}}>Leadership Load Tracker</h1>
+            <p style={{fontSize:11,color:"#7a7a9a",margin:"2px 0 0"}}>KW {iW} · {new Date().toLocaleDateString("de-DE",{weekday:"long",day:"numeric",month:"long"})}</p>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            {todayBI!=null&&(<div style={{textAlign:"center"}}><div style={{width:42,height:42,borderRadius:"50%",border:`3px solid ${biColor(todayBI)}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'IBM Plex Mono',monospace",fontSize:14,fontWeight:700,color:biColor(todayBI)}}>{todayBI}</div><span style={{fontSize:8,color:"#7a7a9a"}}>BI</span></div>)}
+            <button onClick={()=>setShowSettings(!showSettings)} style={{background:"none",border:"none",fontSize:18,cursor:"pointer",color:"#7a7a9a",padding:4}}>⚙️</button>
+          </div>
+        </div>
+      </div>
+
+      {showSettings&&<SettingsPanel onClose={()=>setShowSettings(false)} flash={flash}/>}
+
+      {/* CONTENT */}
+      <div style={{flex:1,padding:"12px 12px 84px",overflowY:"auto"}}>
+
+        {/* CHECK-IN */}
+        {tab==="checkin"&&(<div>
+          <Card>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <h2 style={{fontSize:15,fontWeight:700,margin:0,color:"#1a1a2e"}}>Daily Check-in</h2>
+              {ciSaved?<span style={{fontSize:10,background:"#e8f5e9",color:"#27AE60",padding:"3px 9px",borderRadius:10,fontWeight:600}}>✓ Gespeichert</span>:<span style={{fontSize:10,background:"#FFF3E0",color:"#F39C12",padding:"3px 9px",borderRadius:10,fontWeight:600}}>Ausstehend</span>}
+            </div>
+            {DIMS.map(dim=>(<StepButtons key={dim.key} dim={dim} value={ci[dim.key]} onChange={v=>setCi({...ci,[dim.key]:v})}/>))}
+            <div style={{marginBottom:12}}><div style={{fontSize:12,fontWeight:600,color:"#1a1a2e",marginBottom:4}}>Last im System (1 Satz)</div><input value={ciNote} onChange={e=>setCiNote(e.target.value)} placeholder="Was belastet das System?" style={{...S.inp,width:"100%"}}/></div>
+            {!ciValid&&<p style={{fontSize:11,color:"#F39C12",marginBottom:8}}>⚠ Alle 4 Dimensionen bewerten.</p>}
+            <button onClick={saveCI} style={ciValid?S.btnP:S.btnD} disabled={!ciValid}>{ciSaved?"Aktualisieren":"Speichern"}</button>
+            {ciSaved&&todayBI!=null&&(<div style={{marginTop:12,padding:12,background:"#f4f4f9",borderRadius:10,display:"flex",alignItems:"center",gap:12}}>
+              <div style={{width:44,height:44,borderRadius:"50%",border:`3px solid ${biColor(todayBI)}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:16,fontWeight:700,color:biColor(todayBI)}}>{todayBI}</span></div>
+              <div><div style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>Belastungsindex</div><div style={{fontSize:10,color:"#888"}}>{biLabel(todayBI)}</div></div>
+            </div>)}
+          </Card>
+          {overdueItems.length>0&&(<Card style={{borderLeft:"4px solid #E74C3C"}}><div style={{fontSize:12,fontWeight:600,color:"#E74C3C",marginBottom:4}}>⚠ {overdueItems.length} Item{overdueItems.length>1?"s":""} überfällig</div>{overdueItems.slice(0,3).map(it=>(<div key={it.id} style={{fontSize:11,color:"#666"}}>· {it.title} <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:"#E74C3C"}}>({daysBetween(it.created,t)}d)</span></div>))}</Card>)}
+        </div>)}
+
+        {/* ITEMS */}
+        {tab==="items"&&(<div><Card>
+          <h2 style={{fontSize:15,fontWeight:700,margin:"0 0 10px",color:"#1a1a2e"}}>⚖️ Entscheidungsstau-Tracker</h2>
+          <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>{ITEM_STATUSES.map(s=>{const cnt=db.items.filter(i=>i.status===s.key).length;return(<span key={s.key} style={{fontSize:10,fontWeight:600,padding:"3px 8px",borderRadius:6,background:s.color+"14",color:s.color,fontFamily:"'IBM Plex Mono',monospace"}}>{s.label}: {cnt}</span>)})}</div>
+          <div style={{display:"flex",gap:4,marginBottom:12,flexWrap:"wrap"}}><button onClick={()=>setItemFilter("all")} style={S.chip(itemFilter==="all","#1a1a2e")}>Alle</button>{ITEM_STATUSES.map(s=>(<button key={s.key} onClick={()=>setItemFilter(s.key)} style={S.chip(itemFilter===s.key,s.color)}>{s.label}</button>))}</div>
+          <div style={{display:"flex",gap:6,marginBottom:14}}><input value={newTitle} onChange={e=>setNewTitle(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addItem()} placeholder="Neues Item…" style={S.inp}/><select value={newType} onChange={e=>setNewType(e.target.value)} style={{...S.sel,width:100}}>{ITEM_TYPES.map(t=><option key={t.key} value={t.key}>{t.label}</option>)}</select><button onClick={addItem} style={{padding:"10px 14px",border:"none",borderRadius:8,background:"#1a1a2e",color:"#fff",fontSize:16,cursor:"pointer"}}>+</button></div>
+          {filtered.length===0?(<div style={{textAlign:"center",padding:"18px 0",color:"#bbb"}}><div style={{fontSize:26,opacity:.4}}>📋</div><div style={{fontSize:12}}>{db.items.length===0?"Erste Entscheidung anlegen":"Keine Treffer"}</div></div>):(
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>{filtered.map(it=>{const age=daysBetween(it.created,t);const over=(it.status==="open"||it.status==="in_progress")&&age>=7;const sc=ITEM_STATUSES.find(s=>s.key===it.status);const tp=ITEM_TYPES.find(x=>x.key===it.type);return(
+              <div key={it.id} style={{padding:"10px 12px",borderRadius:10,border:`2px solid ${over?"#E74C3C44":sc.color+"22"}`,background:over?"#E74C3C06":"#fff"}}>
+                <div style={{display:"flex",justifyContent:"space-between",gap:6}}><div style={{flex:1}}><div style={{fontSize:13,fontWeight:500,color:"#1a1a2e"}}>{it.title}</div><div style={{fontSize:10,color:"#aaa",marginTop:2}}>{tp?.label} · {age}d{over&&<span style={{color:"#E74C3C",fontWeight:600}}> · ÜBERFÄLLIG</span>}{it.resolved_at&&<span style={{color:"#27AE60"}}> · {it.resolved_at}</span>}</div></div><button onClick={()=>delItem(it.id)} style={{background:"none",border:"none",fontSize:12,color:"#ccc",cursor:"pointer"}}>✕</button></div>
+                <div style={{display:"flex",gap:4,marginTop:7,flexWrap:"wrap"}}>{ITEM_STATUSES.map(s=>(<button key={s.key} onClick={()=>setStatus(it.id,s.key)} style={S.chip(it.status===s.key,s.color)}>{s.label}</button>))}</div>
+              </div>
+            )})}</div>
+          )}
+        </Card></div>)}
+
+        {/* DASHBOARD */}
+        {tab==="dashboard"&&!showLP&&(<div>
+          <Card style={{background:"linear-gradient(135deg,#1a1a2e,#2a2a48)",color:"#fff"}}>
+            <h2 style={{fontSize:11,fontWeight:600,margin:"0 0 10px",color:"#7a7a9a",letterSpacing:".05em"}}>BELASTUNGSINDEX HEUTE</h2>
+            {todayBI!=null?(<div style={{display:"flex",alignItems:"center",gap:14}}><div style={{width:58,height:58,borderRadius:"50%",border:`3px solid ${biColor(todayBI)}`,display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:20,fontWeight:700,color:biColor(todayBI)}}>{todayBI}</span></div><div><p style={{fontSize:12,margin:0,color:"#ccc"}}>{biLabel(todayBI)}</p><p style={{fontSize:10,margin:"4px 0 0",color:"#666"}}>Skala 0–30 · ø7d: {wStats.biAvg}</p></div></div>):(<div><p style={{fontSize:12,color:"#888",margin:"0 0 8px"}}>Kein Check-in heute.</p><button onClick={()=>setTab("checkin")} style={{...S.btnP,background:"#fff",color:"#1a1a2e",width:"auto",padding:"8px 16px",fontSize:12}}>Jetzt eintragen</button></div>)}
+          </Card>
+          <Card><h3 style={{fontSize:13,fontWeight:700,margin:"0 0 10px",color:"#1a1a2e"}}>Letzte 7 Tage</h3>
+            {wStats.ciCount===0?(<div style={{textAlign:"center",padding:"14px 0",color:"#bbb",fontSize:12}}>Keine Check-ins.</div>):(<>
+              {wStats.ciCount<7&&<p style={{fontSize:10,color:"#F39C12",marginBottom:8}}>⚠ {wStats.ciCount}/7 Tage</p>}
+              {DIMS.map(dim=>{const vals=d7.map(d=>db.checkins[d]?.[dim.key]??null);const filled=vals.filter(v=>v!=null);const avg=filled.length?(filled.reduce((a,b)=>a+b,0)/filled.length).toFixed(1):"–";const c=dim.positive?"#27AE60":"#E74C3C";return(<div key={dim.key} style={{marginBottom:12}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}><span style={{fontSize:11,fontWeight:600}}>{dim.icon} {dim.label}</span><span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,fontWeight:600,color:c}}>ø {avg}</span></div><Spark data={vals} color={c} labels={WD}/></div>)})}
+            </>)}
+          </Card>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}><button onClick={()=>setShowLP(true)} style={{...S.btnS,fontSize:12,padding:12}}>🔗 Lastpfad</button><button onClick={()=>setTab("weekly")} style={{...S.btnS,fontSize:12,padding:12}}>📝 Weekly Review</button></div>
+        </div>)}
+
+        {/* LASTPFAD */}
+        {tab==="dashboard"&&showLP&&(<div>
+          <button onClick={()=>{setShowLP(false);setSelNode(null)}} style={{background:"none",border:"none",fontSize:12,color:"#3498DB",cursor:"pointer",fontWeight:600,marginBottom:8,padding:0}}>← Dashboard</button>
+          <Card><h2 style={{fontSize:15,fontWeight:700,margin:"0 0 3px",color:"#1a1a2e"}}>🔗 Lastpfad</h2><p style={{fontSize:11,color:"#888",margin:"0 0 10px"}}>Quellen → Staupunkte → Abtragungen</p><LastpfadGraph events={db.events} edges={db.edges} onSelect={setSelNode}/></Card>
+          {selNode&&(<Card style={{borderLeft:`4px solid ${EVENT_TYPES[selNode.type].color}`}}>
+            <div style={{display:"flex",justifyContent:"space-between"}}><div><div style={{fontSize:13,fontWeight:700}}>{selNode.label}</div><div style={{fontSize:11,color:"#888",marginTop:2}}>{EVENT_TYPES[selNode.type].icon} {EVENT_TYPES[selNode.type].label} · {daysBetween(selNode.created,t)}d · Δ{selNode.load_delta>0?"+":""}{selNode.load_delta}</div></div><div style={{display:"flex",gap:6}}><button onClick={()=>delEv(selNode.id)} style={{background:"none",border:"none",fontSize:11,color:"#E74C3C",cursor:"pointer"}}>Löschen</button><button onClick={()=>setSelNode(null)} style={{background:"none",border:"none",fontSize:14,color:"#ccc",cursor:"pointer"}}>✕</button></div></div>
+            {db.edges.filter(e=>e.from===selNode.id||e.to===selNode.id).map(ed=>{const other=ed.from===selNode.id?db.events.find(e=>e.id===ed.to):db.events.find(e=>e.id===ed.from);if(!other)return null;return(<div key={ed.id} style={{fontSize:11,color:"#555",display:"flex",alignItems:"center",gap:4,marginTop:4}}><span style={{color:EDGE_TYPES[ed.relation].color,fontWeight:600}}>{EDGE_TYPES[ed.relation].label}</span>{ed.from===selNode.id?"→":"←"} {other.label}<button onClick={()=>delEdge(ed.id)} style={{background:"none",border:"none",fontSize:9,color:"#ccc",cursor:"pointer",marginLeft:"auto"}}>✕</button></div>)})}
+            <button onClick={()=>{setEdgeFrom(selNode.id);setShowEdgeForm(true)}} style={{marginTop:8,fontSize:11,fontWeight:600,color:"#3498DB",background:"none",border:"none",cursor:"pointer",padding:0}}>+ Verknüpfen mit …</button>
+          </Card>)}
+          {showEdgeForm&&(<Card><h3 style={{fontSize:13,fontWeight:700,margin:"0 0 8px"}}>Verbindung</h3>
+            <div style={{display:"flex",gap:4,marginBottom:8,flexWrap:"wrap"}}>{Object.entries(EDGE_TYPES).map(([k,v])=>(<button key={k} onClick={()=>setEdgeRel(k)} style={S.chip(edgeRel===k,v.color)}>{v.label}</button>))}</div>
+            <div style={{display:"flex",gap:6,alignItems:"center"}}><select value={edgeFrom} onChange={e=>setEdgeFrom(e.target.value)} style={{...S.sel,flex:1}}><option value="">Von…</option>{db.events.map(ev=><option key={ev.id} value={ev.id}>{EVENT_TYPES[ev.type].icon} {ev.label}</option>)}</select><span style={{color:"#bbb"}}>→</span><select value={edgeTo} onChange={e=>setEdgeTo(e.target.value)} style={{...S.sel,flex:1}}><option value="">Nach…</option>{db.events.map(ev=><option key={ev.id} value={ev.id}>{EVENT_TYPES[ev.type].icon} {ev.label}</option>)}</select></div>
+            <div style={{display:"flex",gap:8,marginTop:10}}><button onClick={addEdge} style={{...S.btnP,flex:1,fontSize:12,padding:10}}>Erstellen</button><button onClick={()=>setShowEdgeForm(false)} style={{...S.btnS,flex:1,fontSize:12,padding:10}}>Abbrechen</button></div>
+          </Card>)}
+          {db.events.length>0&&(<Card><h3 style={{fontSize:12,fontWeight:700,margin:"0 0 6px",color:"#888"}}>Alle Events</h3>{db.events.map(ev=>{const et=EVENT_TYPES[ev.type];return(<div key={ev.id} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 0",borderBottom:"1px solid #f5f5f8",cursor:"pointer"}} onClick={()=>setSelNode(ev)}><span style={{fontSize:11}}>{et.icon}</span><span style={{flex:1,fontSize:12,fontWeight:500}}>{ev.label}</span><span style={{fontSize:9,color:"#aaa",fontFamily:"'IBM Plex Mono',monospace"}}>Δ{ev.load_delta>0?"+":""}{ev.load_delta} · {daysBetween(ev.created,t)}d</span><button onClick={e=>{e.stopPropagation();delEv(ev.id)}} style={{background:"none",border:"none",fontSize:10,color:"#ddd",cursor:"pointer"}}>✕</button></div>)})}</Card>)}
+          <button onClick={()=>setShowEvEditor(true)} style={S.fab}>+</button>
+          {showEvEditor&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",zIndex:20,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={()=>setShowEvEditor(false)}><div style={{background:"#fff",borderRadius:"18px 18px 0 0",padding:20,width:"100%",maxWidth:440,maxHeight:"70vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
+            <h3 style={{fontSize:15,fontWeight:700,margin:"0 0 12px"}}>Neues Event</h3>
+            <div style={{display:"flex",gap:5,marginBottom:10,flexWrap:"wrap"}}>{Object.entries(EVENT_TYPES).map(([k,v])=>(<button key={k} onClick={()=>setEvType(k)} style={S.chip(evType===k,v.color)}>{v.icon} {v.label}</button>))}</div>
+            <input value={evLabel} onChange={e=>setEvLabel(e.target.value)} placeholder="Label (Pflicht)" style={{...S.inp,width:"100%",marginBottom:10}} onKeyDown={e=>e.key==="Enter"&&addEv()}/>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}><span style={{fontSize:12,color:"#888"}}>Delta:</span><select value={evDelta} onChange={e=>setEvDelta(parseInt(e.target.value))} style={S.sel}>{[-3,-2,-1,0,1,2,3].map(v=><option key={v} value={v}>{v>0?"+":""}{v}</option>)}</select></div>
+            <div style={{display:"flex",gap:8}}><button onClick={addEv} style={{...S.btnP,flex:1}}>Speichern</button><button onClick={()=>setShowEvEditor(false)} style={{...S.btnS,flex:1}}>Abbrechen</button></div>
+          </div></div>)}
+        </div>)}
+
+        {/* WEEKLY */}
+        {tab==="weekly"&&(<div><Card>
+          <h2 style={{fontSize:15,fontWeight:700,margin:"0 0 2px",color:"#1a1a2e"}}>📝 Weekly Review – KW {iW}</h2>
+          <p style={{fontSize:11,color:"#888",margin:"0 0 14px"}}>3-Minuten-Reflexion</p>
+          <div style={{background:"#f4f4f9",borderRadius:10,padding:12,marginBottom:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,textAlign:"center"}}>
+              <div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:17,fontWeight:700,color:"#1a1a2e"}}>{wStats.ciCount}/7</div><div style={{fontSize:9,color:"#888"}}>Check-ins</div></div>
+              <div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:17,fontWeight:700,color:"#E74C3C"}}>{openItems.length}</div><div style={{fontSize:9,color:"#888"}}>Staus</div></div>
+              <div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:17,fontWeight:700,color:"#27AE60"}}>{wStats.resolved}</div><div style={{fontSize:9,color:"#888"}}>Gelöst</div></div>
+            </div>
+          </div>
+          <div style={{background:"#f4f4f9",borderRadius:10,padding:12,marginBottom:14}}>
+            <div style={{fontSize:12,fontWeight:600,marginBottom:5}}>BI-Trends</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,textAlign:"center"}}>
+              <div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,fontWeight:700,color:biColor(parseFloat(wStats.biAvg))}}>{wStats.biAvg}</div><div style={{fontSize:9,color:"#888"}}>ø Mittel</div></div>
+              <div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,fontWeight:700,color:biColor(parseFloat(wStats.biMax))}}>{wStats.biMax}</div><div style={{fontSize:9,color:"#888"}}>Max</div></div>
+              <div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,fontWeight:700,color:biColor(parseFloat(wStats.biMin))}}>{wStats.biMin}</div><div style={{fontSize:9,color:"#888"}}>Min</div></div>
+            </div>
+          </div>
+          <div style={{marginBottom:14}}><div style={{fontSize:12,fontWeight:600,marginBottom:6}}>Reflexionsfragen</div>
+            {["Was war mein größter Stau?","Welche Last war nicht meine?","Was gab Energie?","Was muss nächste Woche geklärt werden?"].map((q,i)=>(<div key={i} style={{padding:"8px 10px",background:"#f9f9fc",borderRadius:6,marginBottom:4,borderLeft:"3px solid #1a1a2e",fontSize:11,color:"#444"}}>{q}</div>))}
+          </div>
+          <textarea value={weekNote} onChange={e=>setWeekNote(e.target.value)} placeholder="Wochenreflexion…" style={{width:"100%",minHeight:80,padding:10,border:"2px solid #eaeaf0",borderRadius:8,fontSize:12,resize:"vertical",outline:"none",boxSizing:"border-box",marginBottom:10}}/>
+          <button onClick={saveWeekly} style={S.btnP}>Wochennotiz speichern</button>
+          <div style={{display:"flex",gap:8,marginTop:10}}><button onClick={doExport} style={{...S.btnS,flex:1,fontSize:12,padding:10}}>📄 CSV</button><button onClick={()=>setShowPrint(true)} style={{...S.btnS,flex:1,fontSize:12,padding:10}}>🖨️ Druckansicht</button></div>
+          {db.weeklyNotes[`${iY}-${iW}`]&&<p style={{fontSize:10,color:"#27AE60",marginTop:6,textAlign:"center"}}>✓ KW {iW} gespeichert</p>}
+        </Card></div>)}
+      </div>
+
+      {/* NAV */}
+      <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:440,background:"#fff",borderTop:"1px solid #eaeaf0",display:"flex",justifyContent:"space-around",padding:"6px 0 10px",boxShadow:"0 -2px 10px rgba(0,0,0,.05)",zIndex:10}}>
+        {TABS.map(n=>(<button key={n.key} onClick={()=>{setTab(n.key);if(n.key!=="dashboard")setShowLP(false)}} style={{background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:1,padding:"3px 10px",opacity:tab===n.key?1:.35,transition:"opacity .2s"}}><span style={{fontSize:18}}>{n.icon}</span><span style={{fontSize:9,fontWeight:600,color:"#1a1a2e"}}>{n.label}</span></button>))}
+      </div>
+    </div>
+  );
+}
+
+/* ═══ ROOT ═══ */
+function Root(){
+  const[unlocked,setUnlocked]=useState(false);
+  if(!unlocked)return <PinLock onUnlock={()=>setUnlocked(true)}/>;
+  return <MainApp/>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Root/>);
+</script>
+</body>
+</html>
